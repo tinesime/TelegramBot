@@ -1,5 +1,4 @@
 import os
-import time
 import psutil
 
 import art
@@ -38,7 +37,7 @@ def check_price(cryptocurrency: str, cryptocurrency_pair: str):
         raise ValueError("Price data not found in API response")
 
 
-async def set_price(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+async def set_price(update: Update, context: ContextTypes.DEFAULT_TYPE, price) -> None:
     global target_price
     global target_currency
     global target_currency_pair
@@ -53,25 +52,34 @@ async def set_price(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     if update.message is not None:
         await update.message.reply_text(
             f'Target price for {target_currency}/{target_currency_pair} set to {target_price}. Starting to monitor price...')
-    context.job_queue.run_repeating(monitor_price, interval=1, first=0,
-                                    context={"cryptocurrency": target_currency,
-                                             "cryptocurrency_pair": target_currency_pair})
+    context.job_queue.run_repeating(monitor_price, interval=1, first=0)
+    context.user_data["cryptocurrency"] = target_currency
+    context.user_data["cryptocurrency_pair"] = target_currency_pair
 
 
 async def monitor_price(context: CallbackContext) -> None:
-    cryptocurrency = context.job.context["cryptocurrency"]
-    cryptocurrency_pair = context.job.context["cryptocurrency_pair"]
-    current_price = check_price(cryptocurrency, cryptocurrency_pair)
-    if current_price < target_price:
-        await context.bot.send_message(chat_id=context.job.context['chat_id'],
-                                       text="The current price is below the target price!")
+    if context.user_data is None:
+        context.user_data = {}
+    cryptocurrency = context.user_data.get("cryptocurrency")
+    cryptocurrency_pair = context.user_data.get("cryptocurrency_pair")
+    if cryptocurrency and cryptocurrency_pair:
+        current_price = check_price(cryptocurrency, cryptocurrency_pair)
+        if current_price < target_price:
+            alert_message = f"The price of {cryptocurrency}/{cryptocurrency_pair} is now less than {target_price}. Current price is {current_price}."
+            print(alert_message)
+            await context.bot.send_message(chat_id=context.user_data.get("chat_id"), text=alert_message)
+            if context.job is not None:
+                context.job.schedule_removal()
+            return
 
 
-async def alert_command(price: float, cryptocurrency: str, cryptocurrency_pair: str, context: ContextTypes.DEFAULT_TYPE):
-    await set_price(price, context)
+async def alert_command(update: Update, price: float, cryptocurrency: str, cryptocurrency_pair: str, context: ContextTypes.DEFAULT_TYPE):
+    await set_price(update, context, float(price))
     if context.job is not None:
-        context.job.context["cryptocurrency"] = cryptocurrency
-        context.job.context["cryptocurrency_pair"] = cryptocurrency_pair
+        context.job.context = {"cryptocurrency": cryptocurrency, "cryptocurrency_pair": cryptocurrency_pair}
+    context.user_data["cryptocurrency"] = cryptocurrency
+    context.user_data["cryptocurrency_pair"] = cryptocurrency_pair
+    context.user_data["chat_id"] = update.message.chat_id
     await monitor_price(context)
 
 
@@ -81,7 +89,7 @@ async def alert(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
             await update.message.reply_text('Please provide three arguments, e.g. "/alert 50000 BTC USDT".')
         return
     price, cryptocurrency, cryptocurrency_pair = context.args
-    await alert_command(float(price), cryptocurrency, cryptocurrency_pair, context)
+    await alert_command(update, float(price), cryptocurrency, cryptocurrency_pair, context)
     if update.message is not None:
         await update.message.reply_text(f'Alert set for {cryptocurrency}/{cryptocurrency_pair} at price {price}.')
 
@@ -118,7 +126,8 @@ async def get_price(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         await update.message.reply_text(f'The price of {cryptocurrency}/{cryptocurrency_pair} is {price}')
 
 
-app = ApplicationBuilder().token(API_TOKEN).build()
+job_queue = JobQueue()
+app = ApplicationBuilder().token(API_TOKEN).job_queue(job_queue).build()
 app.add_handler(CommandHandler("get_price", get_price))
 app.add_handler(CommandHandler("start", start))
 app.add_handler(CommandHandler("alert", alert))
